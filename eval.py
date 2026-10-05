@@ -55,6 +55,18 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+
+def _configure_console_utf8() -> None:
+    """Đảm bảo ghi Unicode lên console hoạt động trên Windows/terminal cũ."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
+_configure_console_utf8()
+
 # --------------------------------------------------------------------------- #
 # Hằng số
 # --------------------------------------------------------------------------- #
