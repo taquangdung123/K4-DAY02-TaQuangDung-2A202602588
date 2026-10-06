@@ -12,6 +12,8 @@
 
 Ba giao theo `Filename` đều rỗng; hợp có đủ 17,509 ảnh và không thiếu ảnh nào. Phân bố toàn bộ `labels.csv` có lớp lớn nhất/lớp nhỏ nhất là 9.02 (9,106/1,009), phù hợp với Table 1.
 
+Biểu đồ số ảnh theo lớp của ba tập: [eda_class_distribution.png](./curves/eda_class_distribution.png). Lớp Negative chiếm khoảng 52%, nên macro-F1 được dùng làm chỉ số chính.
+
 ## Ảnh và EDA
 
 Đã xem ba ảnh train mỗi lớp (27 ảnh; xem [eda_samples.png](./outputs/eda_samples.png)). Ảnh đều 256×256 RGB; `DeepWeedsDataset` chuyển sang RGB và dùng ImageNet mean/std. Trong các mẫu, nền thực địa rối và điều kiện sáng khác nhau làm việc nhận dạng theo lá/cành khó hơn; Chinee Apple và Prickly Acacia là cặp nên kiểm tra kỹ do cùng dạng bụi/cành gai. Ảnh Negative thường có đất, lá khô hoặc thảm cỏ và đôi khi có thực vật không phải mục tiêu.
@@ -48,6 +50,36 @@ Cả năm lần chạy dùng seed 0, fold 0, pretrained ImageNet, ảnh 224×224
 
 Diễn biến loss cho thấy B02 có dấu hiệu overfit rõ hơn: train loss cuối 0.2097 trong khi val loss đạt cực tiểu ở epoch 9 (0.4779) rồi tăng lên 0.5403; macro-F1 val cũng đạt đỉnh ở epoch 9. B01 có giảm macro-F1 nhẹ sau epoch 11; B03/B04 tiếp tục đạt macro-F1 tốt nhất tại epoch 12. B05 đạt đỉnh epoch 9 rồi gần như đi ngang. B03 có macro-F1 val epoch đầu cao nhất (0.8556), gợi ý hội tụ nhanh với tag pretrained đang dùng. GMAC không dự đoán hoàn hảo tốc độ: DeiT có GMAC cao hơn ConvNeXt nhưng epoch ngắn hơn; do khác kiến trúc, kernel và overhead, dùng thời gian/latency đo thực tế để so sánh.
 
+## Bước 2 — Công thức huấn luyện trên ConvNeXt-Tiny
+
+Giữ nguyên fold 0, seed 0, 12 epoch, batch 32, optimizer, LR và mọi tiền xử lý không được nêu trong cột thay đổi. T00 chính là B03; mỗi T01–T03 chỉ thay một yếu tố so với T00. T04 thử tổ hợp hai yếu tố sau khi đã đo riêng. Mọi số dưới đây là **val**, chỉ một seed.
+
+| Mã | Trục/thay đổi so với T00 | Macro-F1 val | Δ so với T00 | Top-1 val | Epoch tốt nhất |
+|---|---|---:|---:|---:|---:|
+| T00 | Finetune, crop + flip, CE | 0,967748 | 0 | 0,975436 | 12 |
+| T01 | A: đóng băng backbone | 0,852196 | −0,115552 | 0,882319 | 10 |
+| T02 | B: thêm ColorJitter | 0,967662 | −0,000086 | 0,974293 | 10 |
+| T03 | C: label smoothing 0,1 | 0,967050 | −0,000698 | 0,974864 | 9 |
+| T04 | T02 + T03 | 0,968369 | +0,000621 | 0,973436 | 10 |
+
+T01 thấp hơn mốc 0,1156, một chênh lệch lớn ở cùng seed và cấu hình, gợi ý đặc trưng ImageNet đóng băng chưa đủ cho ảnh thực địa này. Các chênh lệch T02–T04 đều dưới 0,001; với một seed, không thể phân biệt chúng với nhiễu. Tổ hợp T04 không cho bằng chứng hiệu ứng cộng dồn. Vì vậy, trước khi nhìn test, tôi giữ T00/B03 làm công thức cuối: mức tăng 0,000621 của T04 dưới ngưỡng sàng lọc 0,003 đã đặt trước. Chi tiết lựa chọn được ghi trong [selection.md](selection.md). Bài này dùng một backbone và một seed cho ablation để dành GPU cho ba seed chung kết; đây là giới hạn khi diễn giải.
+
+## Bước 3 — Suy luận và độ trễ trên val
+
+Độ trễ đo trên RTX 3050 Ti Laptop GPU với PyTorch 2.11.0+cu128, 10 lượt warmup, 50 lượt đo, đồng bộ CUDA trước và sau từng lượt. Bảng dùng batch 1, FP32, chỉ tính forward (ảnh đã ở GPU; tiền xử lý và truyền dữ liệu không nằm trong khoảng đo). Thông lượng batch 32 và AMP/BN fusion nằm trong sheet `Latency` của workbook. Các phương pháp thay đổi tiền xử lý 192/256 đọc lại ảnh gốc rồi resize/crop, không phóng to tensor 224 đã crop.
+
+| Mã | Phương pháp | Macro-F1 val | Top-1 val | ECE val | p95 batch 1 (ms) |
+|---|---|---:|---:|---:|---:|
+| I00 | 1 view | 0,967748 | 0,975436 | 0,013102 | 14,25 |
+| I01 | Lật ngang, gộp xác suất | 0,966601 | 0,974579 | 0,010138 | 28,46 |
+| I02 | Ba tỉ lệ 192/224/256 | **0,969649** | 0,976864 | 0,008192 | 44,14 |
+| I03 | Lật ngang, gộp logit | 0,966384 | 0,974579 | 0,012859 | 28,46 |
+| I04 | Kiểm tra ở 256 | 0,968606 | 0,976864 | 0,010406 | 14,99 |
+| I05 | Ensemble B03 + B01 | 0,963270 | 0,972008 | 0,076033 | 28,39 |
+| I07 | Temperature scaling, 1 view | 0,967748 | 0,975436 | **0,004994** | 14,25 |
+
+I02 có macro-F1 val cao hơn I07 0,001901 nhưng p95 dài khoảng 3,1 lần. Với chỉ một seed, chênh F1 này dưới ngưỡng 0,003; tôi chọn I07 cho chung kết vì hiệu chuẩn tốt hơn và chi phí forward không tăng. Nhiệt độ khớp trên val của B03 là 1,4576; ở chung kết sẽ khớp lại **riêng trên val từng seed**, không dùng test. I01/I03 và I05 không tăng macro-F1. AMP batch 1 thực tế chậm hơn FP32 (p95 24,53 so với 14,25 ms); gộp Conv–BN ở ResNet-50 hạ p95 từ 13,86 còn 9,49 ms. Biểu đồ đánh đổi nằm ở [B03_inference_tradeoff.png](./curves/B03_inference_tradeoff.png).
+
 ## Trạng thái kiểm tra cuối cùng
 
 Tôi đã chạy kiểm tra thực tế trên repo với lệnh:
@@ -56,6 +88,6 @@ Tôi đã chạy kiểm tra thực tế trên repo với lệnh:
 python -m unittest discover -s tests
 ```
 
-Kết quả hiện tại: 38 bài test chạy, 36 passed, 2 failed. Hai failure nằm ở `tests/test_eval.py` liên quan đến CLI `eval.py grade`/`I4a` và xuất hiện khi chấm phần tự động theo RUBRIC. Điều này cho thấy các phần Bước 3–4 chưa được chốt hoàn toàn theo tiêu chuẩn của `eval.py`, dù các bước EDA và so sánh backbone đã có dữ liệu thật và kết quả đo được từ `results.xlsx`.
+Kết quả kiểm tra lại trên Windows với `PYTHONUTF8=1`: **38/38 bài test gốc đạt**. Hai failure trước đó do mã hóa Unicode mặc định của console Windows khi ghi `grade_I.json`; không cần sửa `eval.py`. Ba kiểm tra bổ sung cho TTA, temperature scaling và gộp Conv–BN cũng đạt.
 
-Do đó, báo cáo này phản ánh những gì đã chạy và đo được thực tế trong repo hiện tại; các số liệu Part 1 và EDA là đáng tin cậy, còn phần final grading / benchmark theo `eval.py` cần tiếp tục sửa cho đến khi 2 test cuối cùng pass.
+Lượt chạy lại B03 trên RTX 3050 Ti với cùng cấu hình, fold 0 và seed 0 đạt macro-F1 val **0,9677** và top-1 val **0,9754** sau 12 epoch; run riêng là `GPU_RERUN_B03`. Đây vẫn là số val một seed, chưa phải kết quả chung kết/test.

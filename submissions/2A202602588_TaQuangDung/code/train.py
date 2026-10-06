@@ -135,7 +135,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler, scaler, cfg:
     if accumulation_steps < 1:
         raise ValueError("grad_accum_steps must be positive")
     loader_length = len(loader)
-    sample_count = len(loader.dataset)
+    sample_count = len(loader.dataset) if hasattr(loader, "dataset") else sum(targets.size(0) for _, targets, _ in loader)
     if getattr(loader, "drop_last", False) and sample_count % cfg.batch_size:
         sample_count -= sample_count % cfg.batch_size
     optimizer.zero_grad(set_to_none=True)
